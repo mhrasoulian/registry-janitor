@@ -92,6 +92,7 @@ func TestExecuteRespectsMaxDelete(t *testing.T) {
 		if err != nil {
 			t.Fatalf("random.Image() error: %v", err)
 		}
+
 		img, err = mutate.CreatedAt(img, v1.Time{Time: time.Now().Add(-24 * time.Hour)})
 		if err != nil {
 			t.Fatalf("mutate.CreatedAt() error: %v", err)
@@ -118,5 +119,61 @@ rules:
 	_, _, _, _, err = Execute(context.Background(), client, []string{"demo/app"}, cfg, time.Now().UTC(), 0, false)
 	if err == nil {
 		t.Fatal("Execute() should reject an over-limit delete plan")
+	}
+}
+
+type countingClient struct {
+	tags    []string
+	inspect map[string]regclient.InspectResult
+	deletes []string
+}
+
+func (c *countingClient) Repositories(context.Context) ([]string, error) {
+	return []string{"demo/app"}, nil
+}
+
+func (c *countingClient) Tags(context.Context, string) ([]string, error) {
+	return append([]string(nil), c.tags...), nil
+}
+
+func (c *countingClient) Inspect(_ context.Context, _, tag string) (regclient.InspectResult, error) {
+	return c.inspect[tag], nil
+}
+
+func (c *countingClient) DeleteManifest(_ context.Context, repo, digest string) error {
+	c.deletes = append(c.deletes, repo+"@"+digest)
+	return nil
+}
+
+func TestExecuteCountsAndDeletesEachCandidateDigestOnce(t *testing.T) {
+	now := time.Date(2025, 1, 31, 0, 0, 0, 0, time.UTC)
+	client := &countingClient{
+		tags: []string{"newest", "old-a", "old-b"},
+		inspect: map[string]regclient.InspectResult{
+			"newest": {Digest: "sha256:newest", Created: now.Add(-time.Hour)},
+			"old-a":  {Digest: "sha256:shared", Created: now.Add(-48 * time.Hour)},
+			"old-b":  {Digest: "sha256:shared", Created: now.Add(-72 * time.Hour)},
+		},
+	}
+	cfg, err := policy.Load([]byte(`version: 1
+rules:
+  - match: "demo/*"
+    keep_last: 1
+`))
+	if err != nil {
+		t.Fatalf("policy.Load() error: %v", err)
+	}
+
+	deleted, failed, kept, _, err := Execute(
+		context.Background(), client, []string{"demo/app"}, cfg, now, 1, false,
+	)
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if deleted != 1 || failed != 0 || kept != 1 {
+		t.Fatalf("Execute() counts = (%d, %d, %d), want (1, 0, 1)", deleted, failed, kept)
+	}
+	if len(client.deletes) != 1 || client.deletes[0] != "demo/app@sha256:shared" {
+		t.Fatalf("DeleteManifest calls = %v, want the shared digest once", client.deletes)
 	}
 }

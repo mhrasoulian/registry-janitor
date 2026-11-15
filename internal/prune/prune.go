@@ -118,14 +118,14 @@ func Execute(ctx context.Context, client registry.Client, repos []string, p poli
 		return 0, 0, 0, allEntries, nil
 	}
 
-	deleteCount := 0
+	deleteDigests := make(map[string]struct{})
 	for _, entry := range allEntries {
 		if entry.Action == "delete" {
-			deleteCount++
+			deleteDigests[entry.Repository+"@"+entry.Digest] = struct{}{}
 		}
 	}
-	if deleteCount > maxDelete {
-		return 0, 0, 0, allEntries, fmt.Errorf("planned deletions (%d) exceed max-delete (%d)", deleteCount, maxDelete)
+	if len(deleteDigests) > maxDelete {
+		return 0, 0, 0, allEntries, fmt.Errorf("planned deletions (%d) exceed max-delete (%d)", len(deleteDigests), maxDelete)
 	}
 
 	deleted := 0
@@ -136,10 +136,16 @@ func Execute(ctx context.Context, client registry.Client, repos []string, p poli
 			kept++
 		}
 	}
+	deletedDigests := make(map[string]struct{})
 	for _, entry := range allEntries {
 		if entry.Action != "delete" {
 			continue
 		}
+		key := entry.Repository + "@" + entry.Digest
+		if _, alreadyAttempted := deletedDigests[key]; alreadyAttempted {
+			continue
+		}
+		deletedDigests[key] = struct{}{}
 		if err := client.DeleteManifest(ctx, entry.Repository, entry.Digest); err != nil {
 			failed++
 			continue
