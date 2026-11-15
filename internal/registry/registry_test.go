@@ -42,7 +42,7 @@ func TestInMemoryRegistrySupportsManifestDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("img.Digest() error: %v", err)
 	}
-	deleteRef, err := name.NewDigest(host+"/demo/app@" + digest.String())
+	deleteRef, err := name.NewDigest(host + "/demo/app@" + digest.String())
 	if err != nil {
 		t.Fatalf("name.NewDigest() error: %v", err)
 	}

@@ -67,7 +67,7 @@ func (c *RemoteClient) repoRef(repo string) (name.Repository, error) {
 	if err != nil {
 		return name.Repository{}, err
 	}
-	return name.NewRepository(reg.Name()+"/"+repo)
+	return name.NewRepository(reg.Name() + "/" + repo)
 }
 
 func (c *RemoteClient) Repositories(ctx context.Context) ([]string, error) {
