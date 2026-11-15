@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -19,6 +20,10 @@ import (
 )
 
 var version = "dev"
+
+var newRegistryClient = func(host string, insecure bool) registry.Client {
+	return registry.NewClient(host, insecure)
+}
 
 type exitError struct {
 	code int
@@ -117,7 +122,7 @@ func runList(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	client := registry.NewClient(registryHost, insecure)
+	client := newRegistryClient(registryHost, insecure)
 	if len(repos) == 0 {
 		repos, err = client.Repositories(cmd.Context())
 		if err != nil {
@@ -207,7 +212,7 @@ func runPrune(cmd *cobra.Command) error {
 	if err != nil {
 		return exitError{code: 2, err: err}
 	}
-	client := registry.NewClient(registryHost, insecure)
+	client := newRegistryClient(registryHost, insecure)
 	repoNames, err := cmd.Flags().GetStringSlice("repo")
 	if err != nil {
 		return err
@@ -233,20 +238,23 @@ func runPrune(cmd *cobra.Command) error {
 		for _, plan := range plans {
 			entries = append(entries, plan.Entries...)
 		}
-		printPruneOutput(outputType, entries)
-		fmt.Println("DRY RUN: nothing was deleted. Re-run with --execute to apply.")
+		if err := printPruneOutput(cmd.OutOrStdout(), outputType, entries); err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "DRY RUN: nothing was deleted. Re-run with --execute to apply.")
 		return nil
 	}
 	deleted, failed, kept, entries, err := prune.Execute(cmd.Context(), client, repoNames, cfg, time.Now().UTC(), maxDelete, false)
 	if err != nil {
 		return exitError{code: 2, err: err}
 	}
-	if outputType == "json" {
-		printPruneOutput(outputType, entries)
-	} else {
-		printPruneOutput(outputType, entries)
+	if err := printPruneOutput(cmd.OutOrStdout(), outputType, entries); err != nil {
+		return err
 	}
-	fmt.Printf("deleted=%d failed=%d kept=%d\n", deleted, failed, kept)
+	fmt.Fprintf(cmd.OutOrStdout(), "deleted=%d failed=%d kept=%d\n", deleted, failed, kept)
+	if failed > 0 {
+		return exitError{code: 1, err: fmt.Errorf("%d manifest deletion(s) failed", failed)}
+	}
 	return nil
 }
 
@@ -255,15 +263,17 @@ func mustExecute(cmd *cobra.Command) bool {
 	return v
 }
 
-func printPruneOutput(outputType string, entries []output.Entry) {
+func printPruneOutput(w io.Writer, outputType string, entries []output.Entry) error {
 	if outputType == "json" {
 		payload, err := output.JSON(entries)
-		if err == nil {
-			fmt.Println(string(payload))
-			return
+		if err != nil {
+			return err
 		}
+		_, err = fmt.Fprintln(w, string(payload))
+		return err
 	}
-	fmt.Println(output.Table(entries))
+	_, err := fmt.Fprintln(w, output.Table(entries))
+	return err
 }
 
 func formatCreated(ts time.Time) string {
