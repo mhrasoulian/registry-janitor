@@ -105,6 +105,17 @@ func TestRemoteClient_ListAndInspect(t *testing.T) {
 	}
 }
 
+func TestRepoRefPreservesInsecureRegistryScheme(t *testing.T) {
+	client := NewClient("host.docker.internal:5001", true)
+	repo, err := client.repoRef("demo/app")
+	if err != nil {
+		t.Fatalf("repoRef() error: %v", err)
+	}
+	if got, want := repo.Registry.Scheme(), "http"; got != want {
+		t.Fatalf("repository scheme = %q, want %q", got, want)
+	}
+}
+
 func TestRemoteClientDeleteManifest(t *testing.T) {
 	reg := registry.New()
 	srv := httptest.NewServer(reg)
