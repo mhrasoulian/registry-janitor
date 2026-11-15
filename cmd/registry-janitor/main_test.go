@@ -230,6 +230,53 @@ func TestPruneJSONOutputIncludesEverySchemaField(t *testing.T) {
 	}
 }
 
+func TestExamplePolicyRunsAgainstSeededRepositories(t *testing.T) {
+	root, _, _ := testCommands(t)
+	now := time.Now().UTC()
+	client := &testRegistryClient{
+		tags: map[string][]string{
+			"demo/api":    {"latest", "v1.0.0", "v0.9.0", "v0.8.0", "v0.7.0"},
+			"demo/worker": {"latest", "v1.0.0", "v0.9.0", "v0.8.0", "v0.7.0"},
+		},
+		inspect: map[string]registry.InspectResult{},
+	}
+	for _, repo := range []string{"demo/api", "demo/worker"} {
+		for _, seededTag := range []struct {
+			tag    string
+			digest string
+			age    time.Duration
+		}{
+			{tag: "latest", digest: "sha256:shared", age: 100 * 24 * time.Hour},
+			{tag: "v1.0.0", digest: "sha256:shared", age: 100 * 24 * time.Hour},
+			{tag: "v0.9.0", digest: "sha256:recent-old", age: 35 * 24 * time.Hour},
+			{tag: "v0.8.0", digest: "sha256:older", age: 65 * 24 * time.Hour},
+			{tag: "v0.7.0", digest: "sha256:oldest", age: 100 * 24 * time.Hour},
+		} {
+			client.inspect[repo+":"+seededTag.tag] = registry.InspectResult{
+				Digest: seededTag.digest, Created: now.Add(-seededTag.age),
+			}
+		}
+	}
+	restoreClient := newRegistryClient
+	newRegistryClient = func(string, bool) registry.Client { return client }
+	t.Cleanup(func() { newRegistryClient = restoreClient })
+
+	policyPath := filepath.Join("..", "..", "examples", "policy.yaml")
+	var output bytes.Buffer
+	err := executeCommand(root, []string{
+		"prune", "--registry", "localhost:5000", "--insecure", "--policy", policyPath,
+		"--repo", "demo/api,demo/worker",
+	}, &output)
+	if err != nil {
+		t.Fatalf("run tool with example policy: %v", err)
+	}
+	for _, expected := range []string{"demo/api", "demo/worker", "latest", "v1.0.0", "protected"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("example policy output %q does not contain %q", output.String(), expected)
+		}
+	}
+}
+
 func TestInvalidOutputFormatReturnsExitCodeTwoForListAndPrune(t *testing.T) {
 	tests := []struct {
 		name string

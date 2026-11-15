@@ -60,21 +60,21 @@ func newRootCommand() *cobra.Command {
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "List tags in one or more repositories",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runList(cmd)
 		},
 	}
 	prune := &cobra.Command{
 		Use:   "prune",
 		Short: "Build and optionally apply a tag-pruning plan",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runPrune(cmd)
 		},
 	}
 	versionCommand := &cobra.Command{
 		Use:   "version",
 		Short: "Print version information",
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(cmd *cobra.Command, _ []string) {
 			fmt.Fprintln(cmd.OutOrStdout(), version)
 		},
 	}

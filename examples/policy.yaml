@@ -1,0 +1,9 @@
+version: 1
+rules:
+  # The seed command populates these two demo repositories.
+  - match: "demo/*"
+    keep_last: 1
+    older_than: 30d
+    protect_tags:
+      - latest
+      - '^v1\.0\.0$'

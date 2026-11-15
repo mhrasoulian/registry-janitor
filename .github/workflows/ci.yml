@@ -8,10 +8,48 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: go vet ./...
-      - run: golangci-lint run ./...
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
       - run: go test -race ./...
+
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+        env:
+          REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Wait for registry
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:5000/v2/ >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "registry service did not become ready" >&2
+          exit 1
+      - name: Seed registry
+        run: go run ./hack/seed --registry localhost:5000 --insecure
+      - name: Verify dry-run
+        run: go run ./cmd/registry-janitor prune --registry localhost:5000 --insecure --policy examples/policy.yaml --repo demo/api,demo/worker
+      - name: Execute prune
+        run: go run ./cmd/registry-janitor prune --registry localhost:5000 --insecure --policy examples/policy.yaml --repo demo/api,demo/worker --execute
+      - name: Verify retained tags
+        run: |
+          tags="$(go run ./cmd/registry-janitor list --registry localhost:5000 --insecure --repo demo/api,demo/worker --output json)"
+          printf '%s' "$tags" | jq -e 'map(select(.repository == "demo/api")) | map(.tag) | sort == ["latest", "v0.9.0", "v1.0.0"]'
+          printf '%s' "$tags" | jq -e 'map(select(.repository == "demo/worker")) | map(.tag) | sort == ["latest", "v0.9.0", "v1.0.0"]'
