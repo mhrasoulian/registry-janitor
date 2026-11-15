@@ -104,6 +104,9 @@ rules:
 	if !strings.Contains(output.String(), "deleted=2 failed=1 kept=1") {
 		t.Fatalf("output %q does not contain deletion summary", output.String())
 	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("command error %q does not include the deletion failure reason", err)
+	}
 }
 
 func TestInvariant_I1_DryRunDefault(t *testing.T) {

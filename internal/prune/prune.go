@@ -2,6 +2,7 @@ package prune
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -137,6 +138,7 @@ func Execute(ctx context.Context, client registry.Client, repos []string, p poli
 		}
 	}
 	deletedDigests := make(map[string]struct{})
+	var deletionErrors []error
 	for _, entry := range allEntries {
 		if entry.Action != "delete" {
 			continue
@@ -148,11 +150,12 @@ func Execute(ctx context.Context, client registry.Client, repos []string, p poli
 		deletedDigests[key] = struct{}{}
 		if err := client.DeleteManifest(ctx, entry.Repository, entry.Digest); err != nil {
 			failed++
+			deletionErrors = append(deletionErrors, fmt.Errorf("%s@%s: %w", entry.Repository, entry.Digest, err))
 			continue
 		}
 		deleted++
 	}
-	return deleted, failed, kept, allEntries, nil
+	return deleted, failed, kept, allEntries, errors.Join(deletionErrors...)
 }
 
 func RepositoriesFromCatalog(ctx context.Context, client registry.Client, requested []string) ([]string, error) {

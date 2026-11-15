@@ -271,7 +271,7 @@ func runPrune(cmd *cobra.Command) error {
 		return nil
 	}
 	deleted, failed, kept, entries, err := prune.Execute(cmd.Context(), client, repoNames, cfg, time.Now().UTC(), maxDelete, false)
-	if err != nil {
+	if err != nil && failed == 0 {
 		return exitError{code: 2, err: err}
 	}
 	if err := printPruneOutput(cmd.OutOrStdout(), outputType, entries); err != nil {
@@ -280,7 +280,11 @@ func runPrune(cmd *cobra.Command) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "deleted=%d failed=%d kept=%d\n", deleted, failed, kept)
 	var failures []string
 	if failed > 0 {
-		failures = append(failures, fmt.Sprintf("%d manifest deletion(s) failed", failed))
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%d manifest deletion(s) failed: %v", failed, err))
+		} else {
+			failures = append(failures, fmt.Sprintf("%d manifest deletion(s) failed", failed))
+		}
 	}
 	if skipped := countAction(entries, "skip"); skipped > 0 {
 		failures = append(failures, fmt.Sprintf("%d repository inspection(s) failed", skipped))
