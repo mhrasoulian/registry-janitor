@@ -35,7 +35,7 @@ func BuildPlan(ctx context.Context, client registry.Client, repos []string, p po
 		for _, tag := range tagList {
 			info, err := client.Inspect(ctx, repo, tag)
 			if err != nil {
-				slog.WarnContext(ctx, "tag inspection failed; skipping repository", "repository", repo, "tag", tag, "error", err)
+				slog.WarnContext(ctx, "tag inspection failed; skipping repository", "repository", repo, "tag", tag)
 				entryPlan.Entries = append(entryPlan.Entries, output.Entry{
 					Repository: repo,
 					Tag:        tag,

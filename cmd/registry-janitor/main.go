@@ -40,62 +40,73 @@ func main() {
 		var exitErr exitError
 		if errors.As(err, &exitErr) {
 			fmt.Fprintln(os.Stderr, exitErr.err)
-			os.Exit(exitErr.code)
+			os.Exit(commandExitCode(err))
 		}
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(commandExitCode(err))
 	}
 }
 
-var rootCmd = &cobra.Command{
-	Use:           "registry-janitor",
-	Short:         "List and prune OCI image tags in a registry",
-	Version:       version,
-	SilenceUsage:  true,
-	SilenceErrors: true,
+var rootCmd = newRootCommand()
+
+func newRootCommand() *cobra.Command {
+	root := &cobra.Command{
+		Use:           "registry-janitor",
+		Short:         "List and prune OCI image tags in a registry",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List tags in one or more repositories",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runList(cmd)
+		},
+	}
+	prune := &cobra.Command{
+		Use:   "prune",
+		Short: "Build and optionally apply a tag-pruning plan",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPrune(cmd)
+		},
+	}
+	versionCommand := &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Fprintln(cmd.OutOrStdout(), version)
+		},
+	}
+	root.AddCommand(versionCommand)
+	root.AddCommand(list)
+	root.AddCommand(prune)
+
+	list.Flags().String("registry", "", "registry host[:port]")
+	list.Flags().StringSlice("repo", nil, "repository names to inspect")
+	list.Flags().Bool("insecure", false, "allow insecure HTTP")
+	list.Flags().String("output", "table", "output format: table|json")
+
+	prune.Flags().String("registry", "", "registry host[:port]")
+	prune.Flags().String("policy", "", "path to the YAML prune policy")
+	prune.Flags().StringSlice("repo", nil, "repositories to inspect")
+	prune.Flags().Bool("insecure", false, "allow insecure HTTP")
+	prune.Flags().Bool("execute", false, "apply the plan")
+	prune.Flags().Int("max-delete", 100, "maximum number of digests to delete at once")
+	prune.Flags().String("output", "table", "output format: table|json")
+
+	return root
 }
 
-var listCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List tags in one or more repositories",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runList(cmd)
-	},
-}
-
-var versionCmd = &cobra.Command{
-	Use:   "version",
-	Short: "Print version information",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println(version)
-	},
-}
-
-var pruneCmd = &cobra.Command{
-	Use:   "prune",
-	Short: "Build and optionally apply a tag-pruning plan",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runPrune(cmd)
-	},
-}
-
-func init() {
-	rootCmd.AddCommand(versionCmd)
-	rootCmd.AddCommand(listCmd)
-	rootCmd.AddCommand(pruneCmd)
-
-	listCmd.Flags().String("registry", "", "registry host[:port]")
-	listCmd.Flags().StringSlice("repo", nil, "repository names to inspect")
-	listCmd.Flags().Bool("insecure", false, "allow insecure HTTP")
-	listCmd.Flags().String("output", "table", "output format: table|json")
-
-	pruneCmd.Flags().String("registry", "", "registry host[:port]")
-	pruneCmd.Flags().String("policy", "", "path to the YAML prune policy")
-	pruneCmd.Flags().StringSlice("repo", nil, "repositories to inspect")
-	pruneCmd.Flags().Bool("insecure", false, "allow insecure HTTP")
-	pruneCmd.Flags().Bool("execute", false, "apply the plan")
-	pruneCmd.Flags().Int("max-delete", 100, "maximum number of digests to delete at once")
-	pruneCmd.Flags().String("output", "table", "output format: table|json")
+func commandExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr exitError
+	if errors.As(err, &exitErr) {
+		return exitErr.code
+	}
+	return 1
 }
 
 func runList(cmd *cobra.Command) error {
@@ -148,7 +159,7 @@ func runList(cmd *cobra.Command) error {
 		for _, tag := range tags {
 			info, err := client.Inspect(cmd.Context(), repo, tag)
 			if err != nil {
-				slog.WarnContext(cmd.Context(), "tag inspection failed", "repository", repo, "tag", tag, "error", err)
+				slog.WarnContext(cmd.Context(), "tag inspection failed", "repository", repo, "tag", tag)
 				inspectionFailures++
 				continue
 			}

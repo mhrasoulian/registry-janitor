@@ -253,7 +253,7 @@ func TestEvaluatePolicy_NoMatchingRuleSkipsRepo(t *testing.T) {
 	}
 }
 
-func TestInvariant_I1_DryRunDefault(t *testing.T) {
+func TestEvaluateRepository_DryRunPlanContainsDeleteCandidate(t *testing.T) {
 	now := time.Date(2025, 1, 31, 0, 0, 0, 0, time.UTC)
 	tags := []Tag{
 		{Name: "newest", Digest: "sha256:new", Created: now.Add(-1 * time.Hour)},
@@ -360,7 +360,7 @@ func TestInvariant_I6_NoMatchingRuleSkipped(t *testing.T) {
 	}
 }
 
-func TestInvariant_I7_MaxDeleteWouldAbort(t *testing.T) {
+func TestEvaluateRepository_PlanCanExceedDeleteThreshold(t *testing.T) {
 	now := time.Date(2025, 1, 31, 0, 0, 0, 0, time.UTC)
 	tags := []Tag{
 		{Name: "n1", Digest: "sha256:1", Created: now.Add(-10 * 24 * time.Hour)},
@@ -378,7 +378,7 @@ func TestInvariant_I7_MaxDeleteWouldAbort(t *testing.T) {
 	}
 }
 
-func TestInvariant_I8_InspectErrorIsNotDeleted(t *testing.T) {
+func TestEvaluateRepository_UnknownCreationTimeIsNotDeleted(t *testing.T) {
 	now := time.Date(2025, 1, 31, 0, 0, 0, 0, time.UTC)
 	tags := []Tag{
 		{Name: "unknown", Digest: "sha256:missing", Created: time.Time{}},

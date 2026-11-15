@@ -3,14 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/mhrasoulian/registry-janitor/internal/registry"
 )
@@ -47,10 +52,21 @@ func (c *testRegistryClient) Inspect(_ context.Context, repo, tag string) (regis
 func (c *testRegistryClient) DeleteManifest(_ context.Context, repo, digest string) error {
 	key := repo + "@" + digest
 	c.deletes = append(c.deletes, key)
-	return c.deleteErr[key]
+	if err := c.deleteErr[key]; err != nil {
+		return err
+	}
+	remaining := c.tags[repo][:0]
+	for _, tag := range c.tags[repo] {
+		if c.inspect[repo+":"+tag].Digest != digest {
+			remaining = append(remaining, tag)
+		}
+	}
+	c.tags[repo] = remaining
+	return nil
 }
 
 func TestPruneDeletionFailureReturnsExitCodeOne(t *testing.T) {
+	root, _, _ := testCommands(t)
 	now := time.Now().UTC()
 	client := &testRegistryClient{
 		tags: map[string][]string{"demo/app": {"recent", "old1", "old2", "old3"}},
@@ -74,13 +90,12 @@ rules:
 `), 0o600); err != nil {
 		t.Fatalf("write policy: %v", err)
 	}
-	setPruneFlags(t, policyPath, "true", "100", "table")
 	var output bytes.Buffer
-	pruneCmd.SetOut(&output)
-
-	err := runPrune(pruneCmd)
-	var commandErr exitError
-	if !errors.As(err, &commandErr) || commandErr.code != 1 {
+	err := executeCommand(root, []string{
+		"prune", "--registry", "localhost:5000", "--insecure", "--policy", policyPath,
+		"--repo", "demo/app", "--execute", "--max-delete", "100", "--output", "table",
+	}, &output)
+	if commandExitCode(err) != 1 {
 		t.Fatalf("runPrune() error = %v, want exit code 1", err)
 	}
 	if got, want := len(client.deletes), 3; got != want {
@@ -91,41 +106,150 @@ rules:
 	}
 }
 
+func TestInvariant_I1_DryRunDefault(t *testing.T) {
+	root, _, pruneCmd := testCommands(t)
+	now := time.Now().UTC()
+	client := &testRegistryClient{
+		tags: map[string][]string{"demo/app": {"newest", "older"}},
+		inspect: map[string]registry.InspectResult{
+			"demo/app:newest": {Digest: "sha256:newest", Created: now.Add(-time.Hour)},
+			"demo/app:older":  {Digest: "sha256:older", Created: now.Add(-48 * time.Hour)},
+		},
+	}
+	restoreClient := newRegistryClient
+	newRegistryClient = func(string, bool) registry.Client { return client }
+	t.Cleanup(func() { newRegistryClient = restoreClient })
+
+	executeFlag := pruneCmd.Flags().Lookup("execute")
+	if executeFlag.DefValue != "false" || executeFlag.Value.String() != "false" {
+		t.Fatalf("--execute default = %q (value %q), want false", executeFlag.DefValue, executeFlag.Value.String())
+	}
+	before, err := client.Tags(context.Background(), "demo/app")
+	if err != nil {
+		t.Fatalf("read initial tags: %v", err)
+	}
+	policyPath := writeTestPolicy(t)
+	var output bytes.Buffer
+	err = executeCommand(root, []string{
+		"prune", "--registry", "localhost:5000", "--insecure", "--policy", policyPath,
+		"--repo", "demo/app",
+	}, &output)
+	if err != nil {
+		t.Fatalf("prune dry-run: %v", err)
+	}
+	if len(client.deletes) != 0 {
+		t.Fatalf("DeleteManifest calls = %v, want zero", client.deletes)
+	}
+	after, err := client.Tags(context.Background(), "demo/app")
+	if err != nil {
+		t.Fatalf("read tags after dry-run: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("tags after dry-run = %v, want unchanged %v", after, before)
+	}
+	const notice = "DRY RUN: nothing was deleted. Re-run with --execute to apply.\n"
+	if !strings.HasSuffix(output.String(), notice) {
+		t.Fatalf("output does not end with dry-run notice: %q", output.String())
+	}
+}
+
+func TestInvariant_I7_MaxDeleteAbortsBeforeDeletion(t *testing.T) {
+	root, _, _ := testCommands(t)
+	now := time.Now().UTC()
+	client := &testRegistryClient{
+		tags: map[string][]string{"demo/app": {"newest", "old1", "old2"}},
+		inspect: map[string]registry.InspectResult{
+			"demo/app:newest": {Digest: "sha256:newest", Created: now.Add(-time.Hour)},
+			"demo/app:old1":   {Digest: "sha256:old1", Created: now.Add(-48 * time.Hour)},
+			"demo/app:old2":   {Digest: "sha256:old2", Created: now.Add(-72 * time.Hour)},
+		},
+	}
+	restoreClient := newRegistryClient
+	newRegistryClient = func(string, bool) registry.Client { return client }
+	t.Cleanup(func() { newRegistryClient = restoreClient })
+
+	before, err := client.Tags(context.Background(), "demo/app")
+	if err != nil {
+		t.Fatalf("read initial tags: %v", err)
+	}
+	policyPath := writeTestPolicy(t)
+	var output bytes.Buffer
+	err = executeCommand(root, []string{
+		"prune", "--registry", "localhost:5000", "--insecure", "--policy", policyPath,
+		"--repo", "demo/app", "--execute", "--max-delete", "1",
+	}, &output)
+	if commandExitCode(err) != 2 {
+		t.Fatalf("prune error = %v, want exit code 2", err)
+	}
+	if len(client.deletes) != 0 {
+		t.Fatalf("DeleteManifest calls = %v, want zero", client.deletes)
+	}
+	after, err := client.Tags(context.Background(), "demo/app")
+	if err != nil {
+		t.Fatalf("read tags after rejected plan: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("tags after rejected plan = %v, want unchanged %v", after, before)
+	}
+}
+
+func TestPruneJSONOutputIncludesEverySchemaField(t *testing.T) {
+	root, _, _ := testCommands(t)
+	now := time.Now().UTC()
+	client := &testRegistryClient{
+		tags:    map[string][]string{"demo/app": {"newest"}},
+		inspect: map[string]registry.InspectResult{"demo/app:newest": {Digest: "sha256:newest", Created: now}},
+	}
+	restoreClient := newRegistryClient
+	newRegistryClient = func(string, bool) registry.Client { return client }
+	t.Cleanup(func() { newRegistryClient = restoreClient })
+
+	var output bytes.Buffer
+	err := executeCommand(root, []string{
+		"prune", "--registry", "localhost:5000", "--insecure", "--policy", writeTestPolicy(t),
+		"--repo", "demo/app", "--output", "json",
+	}, &output)
+	if err != nil {
+		t.Fatalf("prune JSON dry-run: %v", err)
+	}
+	jsonOutput, _, ok := strings.Cut(output.String(), "\nDRY RUN:")
+	if !ok {
+		t.Fatalf("output has no dry-run notice: %q", output.String())
+	}
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonOutput), &entries); err != nil {
+		t.Fatalf("parse JSON output: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("JSON entries = %d, want 1", len(entries))
+	}
+	for _, field := range []string{"repository", "tag", "digest", "created", "age", "action", "reason"} {
+		if _, ok := entries[0][field]; !ok {
+			t.Errorf("JSON entry is missing schema field %q", field)
+		}
+	}
+}
+
 func TestInvalidOutputFormatReturnsExitCodeTwoForListAndPrune(t *testing.T) {
 	tests := []struct {
 		name string
-		run  func() error
-		set  func() error
+		args []string
 	}{
 		{
 			name: "list",
-			set: func() error {
-				if err := listCmd.Flags().Set("registry", "localhost:5000"); err != nil {
-					return err
-				}
-				return listCmd.Flags().Set("output", "yaml")
-			},
-			run: func() error { return runList(listCmd) },
+			args: []string{"list", "--registry", "localhost:5000", "--output", "yaml"},
 		},
 		{
 			name: "prune",
-			set: func() error {
-				if err := pruneCmd.Flags().Set("registry", "localhost:5000"); err != nil {
-					return err
-				}
-				return pruneCmd.Flags().Set("output", "yaml")
-			},
-			run: func() error { return runPrune(pruneCmd) },
+			args: []string{"prune", "--registry", "localhost:5000", "--output", "yaml"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.set(); err != nil {
-				t.Fatalf("set command flags: %v", err)
-			}
-			err := tt.run()
-			var commandErr exitError
-			if !errors.As(err, &commandErr) || commandErr.code != 2 {
+			root, _, _ := testCommands(t)
+			var output bytes.Buffer
+			err := executeCommand(root, tt.args, &output)
+			if commandExitCode(err) != 2 {
 				t.Fatalf("command error = %v, want exit code 2", err)
 			}
 			if !strings.Contains(err.Error(), "table or json") {
@@ -135,7 +259,8 @@ func TestInvalidOutputFormatReturnsExitCodeTwoForListAndPrune(t *testing.T) {
 	}
 }
 
-func TestPruneReportsInspectionFailureAndProcessesHealthyRepository(t *testing.T) {
+func TestInvariant_I8_InspectionFailureSkipsRepositoryAndContinues(t *testing.T) {
+	root, _, _ := testCommands(t)
 	now := time.Now().UTC()
 	client := &testRegistryClient{
 		tags: map[string][]string{
@@ -161,20 +286,18 @@ rules:
 `), 0o600); err != nil {
 		t.Fatalf("write policy: %v", err)
 	}
-	setPruneFlags(t, policyPath, "true", "100", "table")
-	if err := pruneCmd.Flags().Set("repo", "demo/bad,demo/good"); err != nil {
-		t.Fatalf("set repositories: %v", err)
+	pruneArgs := []string{
+		"prune", "--registry", "localhost:5000", "--insecure", "--policy", policyPath,
+		"--repo", "demo/bad,demo/good", "--execute", "--max-delete", "100", "--output", "table",
 	}
 	var output bytes.Buffer
-	pruneCmd.SetOut(&output)
 	var logs bytes.Buffer
 	restoreLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(restoreLogger) })
 
-	err := runPrune(pruneCmd)
-	var commandErr exitError
-	if !errors.As(err, &commandErr) || commandErr.code != 1 {
+	err := executeCommand(root, pruneArgs, &output)
+	if commandExitCode(err) != 1 {
 		t.Fatalf("runPrune() error = %v, want exit code 1", err)
 	}
 	if got, want := len(client.deletes), 1; got != want {
@@ -182,6 +305,9 @@ rules:
 	}
 	if client.deletes[0] != "demo/good@sha256:good-old" {
 		t.Fatalf("delete calls = %v, want only the healthy repository deletion", client.deletes)
+	}
+	if got, want := len(client.tags["demo/bad"]), 2; got != want {
+		t.Fatalf("bad repository tags remaining = %v, want both tags preserved", client.tags["demo/bad"])
 	}
 	if !strings.Contains(output.String(), "demo/bad") ||
 		!strings.Contains(output.String(), "broken") ||
@@ -195,6 +321,7 @@ rules:
 }
 
 func TestListReportsInspectionFailureAndReturnsExitCodeOne(t *testing.T) {
+	root, _, _ := testCommands(t)
 	client := &testRegistryClient{
 		tags: map[string][]string{"demo/app": {"broken", "healthy"}},
 		inspect: map[string]registry.InspectResult{
@@ -205,25 +332,16 @@ func TestListReportsInspectionFailureAndReturnsExitCodeOne(t *testing.T) {
 	restoreClient := newRegistryClient
 	newRegistryClient = func(string, bool) registry.Client { return client }
 	t.Cleanup(func() { newRegistryClient = restoreClient })
-	if err := listCmd.Flags().Set("registry", "localhost:5000"); err != nil {
-		t.Fatalf("set registry: %v", err)
-	}
-	if err := listCmd.Flags().Set("repo", "demo/app"); err != nil {
-		t.Fatalf("set repository: %v", err)
-	}
-	if err := listCmd.Flags().Set("output", "table"); err != nil {
-		t.Fatalf("set output: %v", err)
-	}
 	var output bytes.Buffer
-	listCmd.SetOut(&output)
 	var logs bytes.Buffer
 	restoreLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(restoreLogger) })
 
-	err := runList(listCmd)
-	var commandErr exitError
-	if !errors.As(err, &commandErr) || commandErr.code != 1 {
+	err := executeCommand(root, []string{
+		"list", "--registry", "localhost:5000", "--repo", "demo/app", "--output", "table",
+	}, &output)
+	if commandExitCode(err) != 1 {
 		t.Fatalf("runList() error = %v, want exit code 1", err)
 	}
 	if !strings.Contains(output.String(), "healthy") {
@@ -234,20 +352,36 @@ func TestListReportsInspectionFailureAndReturnsExitCodeOne(t *testing.T) {
 	}
 }
 
-func setPruneFlags(t *testing.T, policyPath, execute, maxDelete, outputType string) {
+func testCommands(t *testing.T) (*cobra.Command, *cobra.Command, *cobra.Command) {
 	t.Helper()
-	flags := map[string]string{
-		"registry":   "localhost:5000",
-		"policy":     policyPath,
-		"repo":       "demo/app",
-		"insecure":   "true",
-		"execute":    execute,
-		"max-delete": maxDelete,
-		"output":     outputType,
+	root := newRootCommand()
+	list, _, err := root.Find([]string{"list"})
+	if err != nil {
+		t.Fatalf("find list command: %v", err)
 	}
-	for name, value := range flags {
-		if err := pruneCmd.Flags().Set(name, value); err != nil {
-			t.Fatalf("set --%s: %v", name, err)
-		}
+	pruneCmd, _, err := root.Find([]string{"prune"})
+	if err != nil {
+		t.Fatalf("find prune command: %v", err)
 	}
+	return root, list, pruneCmd
+}
+
+func executeCommand(root *cobra.Command, args []string, output io.Writer) error {
+	root.SetArgs(args)
+	root.SetOut(output)
+	root.SetErr(io.Discard)
+	return root.Execute()
+}
+
+func writeTestPolicy(t *testing.T) string {
+	t.Helper()
+	policyPath := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(policyPath, []byte(`version: 1
+rules:
+  - match: "demo/*"
+    keep_last: 1
+`), 0o600); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	return policyPath
 }
