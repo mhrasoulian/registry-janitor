@@ -114,8 +114,8 @@ func runList(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	if outputType != "table" && outputType != "json" {
-		return exitError{code: 2, err: fmt.Errorf("unsupported output format %q: choose table or json", outputType)}
+	if err := validateOutputFormat(outputType); err != nil {
+		return err
 	}
 
 	repos, err := cmd.Flags().GetStringSlice("repo")
@@ -185,6 +185,13 @@ func runPrune(cmd *cobra.Command) error {
 	if strings.TrimSpace(registryHost) == "" {
 		return exitError{code: 2, err: fmt.Errorf("--registry is required")}
 	}
+	outputType, err := cmd.Flags().GetString("output")
+	if err != nil {
+		return err
+	}
+	if err := validateOutputFormat(outputType); err != nil {
+		return err
+	}
 	policyPath, err := cmd.Flags().GetString("policy")
 	if err != nil {
 		return err
@@ -225,10 +232,6 @@ func runPrune(cmd *cobra.Command) error {
 	}
 	repoNames = prune.NormalizeRepos(repoNames)
 	repoNames = prune.OrderedRepos(repoNames)
-	outputType, err := cmd.Flags().GetString("output")
-	if err != nil {
-		return err
-	}
 	if !mustExecute(cmd) {
 		plans, err := prune.BuildPlan(cmd.Context(), client, repoNames, cfg, time.Now().UTC())
 		if err != nil {
@@ -254,6 +257,13 @@ func runPrune(cmd *cobra.Command) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "deleted=%d failed=%d kept=%d\n", deleted, failed, kept)
 	if failed > 0 {
 		return exitError{code: 1, err: fmt.Errorf("%d manifest deletion(s) failed", failed)}
+	}
+	return nil
+}
+
+func validateOutputFormat(outputType string) error {
+	if outputType != "table" && outputType != "json" {
+		return exitError{code: 2, err: fmt.Errorf("unsupported output format %q: choose table or json", outputType)}
 	}
 	return nil
 }

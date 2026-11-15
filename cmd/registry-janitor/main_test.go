@@ -90,6 +90,50 @@ rules:
 	}
 }
 
+func TestInvalidOutputFormatReturnsExitCodeTwoForListAndPrune(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func() error
+		set  func() error
+	}{
+		{
+			name: "list",
+			set: func() error {
+				if err := listCmd.Flags().Set("registry", "localhost:5000"); err != nil {
+					return err
+				}
+				return listCmd.Flags().Set("output", "yaml")
+			},
+			run: func() error { return runList(listCmd) },
+		},
+		{
+			name: "prune",
+			set: func() error {
+				if err := pruneCmd.Flags().Set("registry", "localhost:5000"); err != nil {
+					return err
+				}
+				return pruneCmd.Flags().Set("output", "yaml")
+			},
+			run: func() error { return runPrune(pruneCmd) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.set(); err != nil {
+				t.Fatalf("set command flags: %v", err)
+			}
+			err := tt.run()
+			var commandErr exitError
+			if !errors.As(err, &commandErr) || commandErr.code != 2 {
+				t.Fatalf("command error = %v, want exit code 2", err)
+			}
+			if !strings.Contains(err.Error(), "table or json") {
+				t.Fatalf("error %q does not list allowed output values", err)
+			}
+		})
+	}
+}
+
 func setPruneFlags(t *testing.T, policyPath, execute, maxDelete, outputType string) {
 	t.Helper()
 	flags := map[string]string{
