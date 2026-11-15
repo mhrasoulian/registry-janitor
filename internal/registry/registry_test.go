@@ -111,7 +111,7 @@ func TestRepoRefPreservesInsecureRegistryScheme(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repoRef() error: %v", err)
 	}
-	if got, want := repo.Registry.Scheme(), "http"; got != want {
+	if got, want := repo.Scheme(), "http"; got != want {
 		t.Fatalf("repository scheme = %q, want %q", got, want)
 	}
 }
