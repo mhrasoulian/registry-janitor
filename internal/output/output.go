@@ -40,7 +40,7 @@ func Table(entries []Entry) string {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			entry.Repository,
 			entry.Tag,
-			entry.Digest,
+			tableDigest(entry.Digest),
 			entry.Created,
 			entry.Age,
 			entry.Action,
@@ -49,6 +49,13 @@ func Table(entries []Entry) string {
 	}
 	_ = w.Flush()
 	return buf.String()
+}
+
+func tableDigest(digest string) string {
+	if len(digest) <= 12 {
+		return digest
+	}
+	return digest[:12]
 }
 
 func JSON(entries []Entry) ([]byte, error) {

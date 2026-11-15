@@ -14,6 +14,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
+	"github.com/mhrasoulian/registry-janitor/internal/output"
 	"github.com/mhrasoulian/registry-janitor/internal/policy"
 	regclient "github.com/mhrasoulian/registry-janitor/internal/registry"
 )
@@ -155,6 +156,7 @@ func TestExecuteCountsAndDeletesEachCandidateDigestOnce(t *testing.T) {
 			"old-b":  {Digest: "sha256:shared", Created: now.Add(-72 * time.Hour)},
 		},
 	}
+
 	cfg, err := policy.Load([]byte(`version: 1
 rules:
   - match: "demo/*"
@@ -175,5 +177,47 @@ rules:
 	}
 	if len(client.deletes) != 1 || client.deletes[0] != "demo/app@sha256:shared" {
 		t.Fatalf("DeleteManifest calls = %v, want the shared digest once", client.deletes)
+	}
+}
+
+func TestPrune_DeletesByFullDigest(t *testing.T) {
+	now := time.Date(2025, 1, 31, 0, 0, 0, 0, time.UTC)
+	fullDigest := "sha256:" + strings.Repeat("a", 64)
+	client := &countingClient{
+		tags: []string{"newest", "old"},
+		inspect: map[string]regclient.InspectResult{
+			"newest": {Digest: "sha256:" + strings.Repeat("b", 64), Created: now.Add(-time.Hour)},
+			"old":    {Digest: fullDigest, Created: now.Add(-48 * time.Hour)},
+		},
+	}
+	cfg, err := policy.Load([]byte(`version: 1
+rules:
+  - match: "demo/*"
+    keep_last: 1
+`))
+	if err != nil {
+		t.Fatalf("policy.Load() error: %v", err)
+	}
+
+	deleted, failed, _, entries, err := Execute(
+		context.Background(), client, []string{"demo/app"}, cfg, now, 1, false,
+	)
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if deleted != 1 || failed != 0 {
+		t.Fatalf("Execute() counts = (%d, %d), want (1, 0)", deleted, failed)
+	}
+	if len(client.deletes) != 1 || client.deletes[0] != "demo/app@"+fullDigest {
+		t.Fatalf("DeleteManifest calls = %v, want full digest %q", client.deletes, fullDigest)
+	}
+
+	table := output.Table(entries)
+	shortDigest := fullDigest[:12]
+	if !strings.Contains(table, shortDigest) {
+		t.Fatalf("table output %q does not display shortened digest %q", table, shortDigest)
+	}
+	if strings.Contains(table, fullDigest) {
+		t.Fatalf("table output displays full digest: %q", table)
 	}
 }
