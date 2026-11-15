@@ -1,185 +1,219 @@
 # registry-janitor
 
-`registry-janitor` lists OCI registry tags and removes policy-selected manifests by digest.
+A command-line tool safely deletes old container images (packaged apps) from registries (storage servers), so they do not grow forever.
 
 [![CI](https://github.com/mhrasoulian/registry-janitor/actions/workflows/ci.yml/badge.svg)](https://github.com/mhrasoulian/registry-janitor/actions/workflows/ci.yml)
+CI means continuous integration: automated checks that run when code changes.
 
-## What it does
+## The problem
+- Every build in an automated pipeline sends a new image to storage.
+- Older copies pile up when nobody removes them.
+- Without cleanup, stored copies can use space without limit.
+- Manual deletion is risky: removing the wrong copy can break a deployment that still needs it.
+- One deletion can remove several version names at once.
 
-A **tag** is a human-readable name that points to an OCI image manifest or index.
-A **digest** is the content-addressed identifier of a manifest or index; multiple tags can point to the same digest.
+## What this tool does
+- Lists version names and creation times stored for selected apps.
+- Applies a short policy file that you write.
+- Shows a dry run (a preview that changes nothing) first; it deletes only with `--execute`.
+This tool is for people who run their own container registry.
 
-The CLI lists tags and plans policy-based cleanup for OCI Distribution registries. Pruning is a dry run unless `--execute` is set. Execution deletes manifests by digest, so all tags that reference a deleted digest are affected.
+### What it will never do
+- Delete the newest image in a repository (a named group of images).
+- Delete a version name protected by your policy.
+- Delete an image whose creation time is unknown.
+- Delete an image still used by a kept version name.
+- Start deleting when the plan exceeds `--max-delete`.
+- Partly prune a repository when it cannot inspect one of its images.
 
-## Quick start
+## Key words
+- **Registry:** a server that stores images and their version names.
+- **Image:** a packaged application and the files needed to run it.
+- **Tag:** a readable version name that points to an image.
+- **Digest:** an identifier for the exact contents of an image.
+A tag is a label on a box; a digest is the box's serial number.
+Two labels can share one box; throwing it away removes both labels.
 
-The local demo requires Docker and Go. It publishes the registry on `localhost:5001`.
-
+## Try it in 2 minutes
+You need Go 1.22 or newer, Docker, and Docker Compose.
 ```sh
-make up
-make seed
-make demo
-make down
-docker compose down -v
+# Copy the project from GitHub.
+git clone git@github.com:mhrasoulian/registry-janitor.git
+# Enter the project directory.
+cd registry-janitor
 ```
-
-`make demo` output from the seeded local registry:
-
+```sh
+# Start the local demo registry.
+make up
+# Add sample images and version names.
+make seed
+# Preview the planned deletions.
+make demo
+```
+`make demo` produced this table during a real run:
 ```text
 REPOSITORY   TAG     DIGEST        CREATED               AGE   ACTION  REASON
-demo/api     latest  sha256:294e9  2026-08-07T12:07:11Z  100d  keep    protected
-demo/api     v0.7.0  sha256:0a9e1  2026-08-07T12:07:11Z  100d  delete  delete-candidate
-demo/api     v0.8.0  sha256:ad0b3  2026-09-11T12:07:11Z  65d   delete  delete-candidate
-demo/api     v0.9.0  sha256:2aa33  2026-10-11T12:07:11Z  35d   keep    keep_last
-demo/api     v1.0.0  sha256:294e9  2026-08-07T12:07:11Z  100d  keep    protected
-demo/worker  latest  sha256:76d0c  2026-08-07T12:07:11Z  100d  keep    protected
-demo/worker  v0.7.0  sha256:bec8d  2026-08-07T12:07:11Z  100d  delete  delete-candidate
-demo/worker  v0.8.0  sha256:25441  2026-09-11T12:07:11Z  65d   delete  delete-candidate
-demo/worker  v0.9.0  sha256:6b17f  2026-10-11T12:07:11Z  35d   keep    keep_last
-demo/worker  v1.0.0  sha256:76d0c  2026-08-07T12:07:11Z  100d  keep    protected
+demo/api     latest  sha256:05360  2026-08-07T12:45:55Z  100d  keep    protected
+demo/api     v0.7.0  sha256:3e79c  2026-08-07T12:45:55Z  100d  delete  delete-candidate
+demo/api     v0.8.0  sha256:0f355  2026-09-11T12:45:55Z  65d   delete  delete-candidate
+demo/api     v0.9.0  sha256:0db60  2026-10-11T12:45:55Z  35d   keep    keep_last
+demo/api     v1.0.0  sha256:05360  2026-08-07T12:45:55Z  100d  keep    protected
+demo/worker  latest  sha256:45fbb  2026-08-07T12:45:55Z  100d  keep    protected
+demo/worker  v0.7.0  sha256:d8720  2026-08-07T12:45:55Z  100d  delete  delete-candidate
+demo/worker  v0.8.0  sha256:94d0e  2026-09-11T12:45:55Z  65d   delete  delete-candidate
+demo/worker  v0.9.0  sha256:cb7c7  2026-10-11T12:45:55Z  35d   keep    keep_last
+demo/worker  v1.0.0  sha256:45fbb  2026-08-07T12:45:55Z  100d  keep    protected
 
 DRY RUN: nothing was deleted. Re-run with --execute to apply.
 ```
+`ACTION` says whether the tool keeps, deletes, or skips a name; `REASON` explains why. The displayed digest is shortened; deletion uses the full value.
+### Apply it for real
+```sh
+# Apply the plan to localhost:5001.
+go run ./cmd/registry-janitor prune --registry localhost:5001 --insecure --policy examples/policy.yaml --repo demo/api,demo/worker --execute
+```
+The real run reported `deleted=4 failed=0 kept=6`.
+### Clean up
+```sh
+# Stop the demo registry container.
+make down
+# Remove its stored demo data and network.
+docker compose down -v
+```
 
-## How the policy decides
-
-The example policy is in [`examples/policy.yaml`](examples/policy.yaml). Its fields are:
-
-| Field | Type | Default | Meaning |
+## How it decides what to delete
+1. It applies the first policy rule that matches a repository name.
+2. It keeps names with an unknown creation time or a date set to January 1, 1970.
+3. It keeps names that match `protect_tags`.
+4. It keeps the newest `keep_last` names, ordered by creation time.
+5. It keeps remaining names younger than `older_than`, when that field is set.
+6. It keeps a candidate image if any kept name points to the same digest.
+7. It deletes each remaining digest once; if all names would be deleted, it keeps the newest.
+The example policy in [`examples/policy.yaml`](examples/policy.yaml) targets the two repositories created by `make seed`:
+```yaml
+version: 1 # Required policy format version.
+rules: # Rules are checked from top to bottom.
+  - match: "demo/*" # Match repository names under demo/.
+    keep_last: 1 # Keep the newest matching name.
+    older_than: 30d # Keep other names younger than 30 days.
+    protect_tags: # Always keep these names.
+      - latest
+      - '^v1\.0\.0$'
+```
+| Field | Meaning | Default | Required? |
 |---|---|---|---|
-| `version` | integer | Required | Must be `1`. |
-| `rules` | list | Required | One or more repository rules. |
-| `match` | string | Required | Repository glob; the first matching rule is used. |
-| `keep_last` | integer | Required | Keep at least this many newest tags; must be at least `1`. |
-| `older_than` | duration string | None | Tags younger than this age are kept; supports day suffixes such as `30d` and Go durations. |
-| `protect_tags` | list of regular expressions | None | Matching tag names are kept. Patterns are matched against the whole tag name. |
+| `version` | Policy format; must be `1`. | None | Required |
+| `rules` | Ordered repository rules; at least one is needed. | None | Required |
+| `match` | Repository-name pattern for this rule. | None | Required |
+| `keep_last` | Minimum newest names to keep; must be at least `1`. | None | Required |
+| `older_than` | Keep otherwise eligible names younger than this duration. | None | Optional |
+| `protect_tags` | Names that always stay. Patterns match the full name. | None | Optional |
+The demo policy protects `latest` and `v1.0.0`, then keeps the newest other name.
+It marks two older names for deletion in each repository.
 
-Evaluation order:
+## Built with
+| Technology | Version | Used for |
+|---|---|---|
+| Go | 1.22 | CLI and demo seeder. |
+| `github.com/google/go-containerregistry` | 0.20.2 | Registry access and sample image publishing. |
+| `github.com/spf13/cobra` | 1.9.1 | Commands and flags. |
+| `gopkg.in/yaml.v3` | 3.0.1 | Reading YAML (a readable text format) policy files. |
+| Docker, Docker Compose, `registry:2` | Docker and Compose unpinned; image `registry:2` | Local demo registry. |
+| GitHub Actions | checkout v7, setup-go v7 | Automated checks and registry demo. |
+| golangci-lint | v2.15.0, action v9 | Go lint checks in CI. |
+| Make | Makefile | Build, test, lint, and demo commands. |
 
-1. Select the first rule whose glob matches the repository. Repositories without a match are skipped.
-2. Sort tags by creation time, newest first; ties are ordered by tag name.
-3. Keep tags with unknown or epoch creation times and tags matching `protect_tags`.
-4. Keep the first `keep_last` tags and any remaining tags younger than `older_than`.
-5. Mark remaining tags as candidates, then keep candidates that share a digest with any kept tag.
-6. If all tags would be deleted, keep the newest tag. Delete each remaining candidate digest once.
+## Safety rules and how they are tested
+<details>
+<summary>Show safety rules and test names</summary>
 
-In the captured demo output above, each repository's `latest` and `v1.0.0` tags are protected and share a digest; `v0.9.0` is retained by `keep_last`; `v0.8.0` and `v0.7.0` are deletion candidates. The displayed ages vary by run.
+| ID | Safety rule | Test |
+|---|---|---|
+| I1 | Pruning previews changes by default and makes no deletions. | `TestInvariant_I1_DryRunDefault` |
+| I2 | Protected version names are never deleted. | `TestInvariant_I2_ProtectedTagsNeverDeleted` |
+| I3 | The newest version name is never deleted. | `TestInvariant_I3_NewestTagNeverDeleted` |
+| I4 | An image stays if any kept name points to it. | `TestInvariant_I4_SharesDigestWithKeptTag` |
+| I5 | Images with unknown or epoch creation times stay. | `TestInvariant_I5_UnknownAgeNeverDeleted` |
+| I6 | Repositories without a matching rule stay untouched. | `TestInvariant_I6_NoMatchingRuleSkipped` |
+| I7 | A plan over `--max-delete` stops before any deletion. | `TestInvariant_I7_MaxDeleteAbortsBeforeDeletion` |
+| I8 | An inspection failure skips that repository; other repositories continue. | `TestInvariant_I8_InspectionFailureSkipsRepositoryAndContinues` |
+</details>
 
 ## Command reference
-
-Flags below are from `--help`.
-
 ### `list`
-
 | Flag | Default | Meaning |
 |---|---|---|
-| `--registry` | None; required | Registry host and optional port. |
-| `--repo` | None | Repository names; when omitted, use the registry catalog. |
+| `--registry` | Empty; required | Registry host and optional port. |
+| `--repo` | Empty | Names to inspect; omitted means all names the registry lists. |
 | `--insecure` | `false` | Allow plain HTTP. |
-| `--output` | `table` | Output format: `table` or `json`. |
-
+| `--output` | `table` | Choose `table` or `json`. |
+| `-h, --help` | `false` | Show command help. |
+Table columns are `REPOSITORY`, `TAG`, `DIGEST`, and `CREATED`; JSON has `repository`, `tag`, `digest`, and `created`.
 ### `prune`
-
 | Flag | Default | Meaning |
 |---|---|---|
-| `--registry` | None; required | Registry host and optional port. |
-| `--policy` | None; required | YAML policy file. |
-| `--repo` | None | Repositories to inspect; when omitted, use the registry catalog. |
+| `--registry` | Empty; required | Registry host and optional port. |
+| `--policy` | Empty; required | Path to the YAML policy file. |
+| `--repo` | Empty | Names to inspect; omitted means all names the registry lists. |
 | `--insecure` | `false` | Allow plain HTTP. |
-| `--execute` | `false` | Apply the plan instead of running a dry run. |
-| `--max-delete` | `100` | Maximum unique repository/digest pairs to delete in one run. |
-| `--output` | `table` | Output format: `table` or `json`. |
-
-The registry client reads `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` for authentication; if both are empty, it uses anonymous access.
-
+| `--execute` | `false` | Delete the planned images instead of previewing. |
+| `--max-delete` | `100` | Maximum digest deletions in one run. |
+| `--output` | `table` | Choose `table` or `json`. |
+| `-h, --help` | `false` | Show command help. |
+Prune tables show `REPOSITORY`, `TAG`, `DIGEST`, `CREATED`, `AGE`, `ACTION`, and `REASON`. JSON has `repository`, `tag`, `digest`, `created`, `age`, `action`, and `reason`.
+Set `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` for authentication. If both are empty, the client uses anonymous access.
 | Exit code | Meaning |
 |---|---|
-| `0` | Command completed successfully. |
-| `1` | A registry operation failed, tag inspection failed, or one or more manifest deletions failed. |
-| `2` | A validated argument or policy is invalid, output format is unsupported, `--max-delete` is negative, or the deletion plan exceeds `--max-delete`. |
-
-## Safety model
-
-| ID | Invariant | Test |
-|---|---|---|
-| I1 | Prune defaults to dry run and does not call deletion. | `TestInvariant_I1_DryRunDefault` |
-| I2 | Protected tags are never deleted. | `TestInvariant_I2_ProtectedTagsNeverDeleted` |
-| I3 | The newest tag is never deleted. | `TestInvariant_I3_NewestTagNeverDeleted` |
-| I4 | A digest is deleted only when all its tags are candidates. | `TestInvariant_I4_SharesDigestWithKeptTag` |
-| I5 | Unknown or epoch creation times are never deleted. | `TestInvariant_I5_UnknownAgeNeverDeleted` |
-| I6 | Repositories without a matching rule are skipped. | `TestInvariant_I6_NoMatchingRuleSkipped` |
-| I7 | Exceeding `--max-delete` aborts before deletion. | `TestInvariant_I7_MaxDeleteAbortsBeforeDeletion` |
-| I8 | An inspection failure skips that repository; other repositories continue. | `TestInvariant_I8_InspectionFailureSkipsRepositoryAndContinues` |
-
-## Running in Docker
-
-Build and inspect the image:
-
-```sh
-docker build -t registry-janitor:local .
-docker run --rm registry-janitor:local --help
-docker run --rm registry-janitor:local version
-```
-
-On macOS, `host.docker.internal` addresses the host from a container. For a read-only list against the local demo registry:
-
-```sh
-docker run --rm registry-janitor:local list --registry host.docker.internal:5001 --insecure --repo demo/api,demo/worker --output json
-```
-
-## Architecture
-
-```mermaid
-flowchart TD
-  CLI --> Policy
-  CLI --> Inspect
-  Policy --> Plan
-  Inspect --> Plan
-  Plan --> DryRun
-  Plan --> Execute
-```
-
-| Package | Responsibility |
-|---|---|
-| `cmd/registry-janitor` | CLI flags, policy loading, output, and exit codes. |
-| `internal/policy` | YAML validation and tag decisions. |
-| `internal/registry` | OCI catalog, tag inspection, authentication, and manifest deletion. |
-| `internal/prune` | Repository inspection, plan construction, deletion limits, and execution. |
-| `internal/output` | Stable table and JSON formatting. |
-| `hack/seed` | Local-only synthetic demo images. |
+| `0` | The command completed successfully. |
+| `1` | A registry operation, inspection, repository inspection, or deletion failed. |
+| `2` | Required arguments, policy, output format, or deletion limit are invalid; oversized plans also return this code. |
 
 ## Limitations
-
-- Deletion requires `REGISTRY_STORAGE_DELETE_ENABLED=true` in the registry.
-- In the seeded registry run, `du -sh /var/lib/registry` reported 852.0K before pruning, 724.0K after pruning, and 628.0K after garbage collection. These are demo-specific measurements; garbage collection reduced usage further.
-- Tag inspections run sequentially.
-- For a multi-architecture index, creation time is taken from its first child image.
-- If the registry catalog is disabled, pass repositories explicitly with `--repo`.
-- The client uses OCI Distribution endpoints; it does not configure provider-specific cleanup policies for GitLab, Nexus, or Harbor.
+- Tested against Docker's `registry:2` and an in-memory test registry only.
+- Deletion requires `REGISTRY_STORAGE_DELETE_ENABLED=true` on the registry.
+- Registry garbage collection (removing files no longer referenced) may reclaim space after deletion.
+- An earlier demo run measured 852.0K before pruning, 724.0K after pruning, and 628.0K after garbage collection.
+- The tool inspects one tag at a time.
+- Multi-architecture images (built for several processor types) use the first child image's creation time.
+- If the registry cannot list repositories, pass `--repo` with the names to inspect.
 
 ## Troubleshooting
+- If deletion is disabled, the tool says: `delete is not enabled for this registry: set REGISTRY_STORAGE_DELETE_ENABLED=true`.
+- If macOS port 5000 is occupied, the Compose demo uses host port 5001.
+- Docker containers need `--insecure` to reach this plain-HTTP demo through `host.docker.internal`.
+  Without it, the reproduced error was `http: server gave HTTP response to HTTPS client`.
 
-- A registry that rejects manifest deletion reports: `delete is not enabled for this registry: set REGISTRY_STORAGE_DELETE_ENABLED=true`.
-- Port 5000 was occupied on this macOS host, so the local Compose demo uses host port 5001.
-- Use `--insecure` for a plain-HTTP registry addressed by a non-localhost name. In the container test, `host.docker.internal` failed without this flag.
+## How it works inside
+```mermaid
+flowchart TD
+  Tool --> Policy --> Plan
+  Tool --> Registry --> Plan
+  Plan --> Preview
+  Plan --> Delete
+```
+| Package | Responsibility |
+|---|---|
+| `cmd/registry-janitor` | Command flags, policy loading, output, and exit codes. |
+| `internal/policy` | Policy validation and keep/delete decisions. |
+| `internal/registry` | Listing repositories and names, inspecting images, and deleting. |
+| `internal/prune` | Building plans, enforcing limits, and executing deletions. |
+| `internal/output` | Formatting table and JSON output. |
+| `hack/seed` | Creating and publishing local demo images. |
 
 ## Development
-
 | Target | Action |
 |---|---|
 | `make build` | Build `bin/registry-janitor`. |
 | `make test` | Run Go tests. |
 | `make lint` | Run golangci-lint. |
 | `make fmt` | Format Go files. |
-| `make vet` | Run `go vet`. |
+| `make vet` | Run `go vet ./...`. |
 | `make up` | Start the local registry. |
-| `make seed` | Push the synthetic demo images. |
-| `make demo` | Run the dry-run against the demo repositories. |
-| `make down` | Stop/remove Compose containers and network; keeps the volume. |
+| `make seed` | Publish demo images and names. |
+| `make demo` | Preview pruning for the demo repositories. |
+| `make down` | Stop containers and remove the Compose network. |
 | `make clean` | Remove the local CLI binary. |
-
 Run `go test -race -cover ./...`, `go vet ./...`, and `golangci-lint run ./...` to validate changes.
 
 ## License
-
 See [`LICENSE`](LICENSE).
