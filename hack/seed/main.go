@@ -17,7 +17,7 @@ import (
 )
 
 func main() {
-	registryFlag := flag.String("registry", "localhost:5000", "local registry host[:port]")
+	registryFlag := flag.String("registry", "localhost:5001", "local registry host[:port]")
 	insecure := flag.Bool("insecure", false, "use insecure HTTP")
 	flag.Parse()
 

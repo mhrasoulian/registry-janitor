@@ -1,6 +1,6 @@
 version: 1
 rules:
-  # The seed command populates these two demo repositories.
+  # The seed command populates these repositories at localhost:5001.
   - match: "demo/*"
     keep_last: 1
     older_than: 30d

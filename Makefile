@@ -25,10 +25,10 @@ up:
 	docker compose up -d
 
 seed:
-	go run ./hack/seed --registry localhost:5000 --insecure
+	go run ./hack/seed --registry localhost:5001 --insecure
 
 demo:
-	go run ./cmd/registry-janitor prune --registry localhost:5000 --insecure --policy examples/policy.yaml --repo demo/api,demo/worker
+	go run ./cmd/registry-janitor prune --registry localhost:5001 --insecure --policy examples/policy.yaml --repo demo/api,demo/worker
 
 down:
 	docker compose down
