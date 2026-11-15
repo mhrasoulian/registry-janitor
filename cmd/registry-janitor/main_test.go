@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,6 +132,105 @@ func TestInvalidOutputFormatReturnsExitCodeTwoForListAndPrune(t *testing.T) {
 				t.Fatalf("error %q does not list allowed output values", err)
 			}
 		})
+	}
+}
+
+func TestPruneReportsInspectionFailureAndProcessesHealthyRepository(t *testing.T) {
+	now := time.Now().UTC()
+	client := &testRegistryClient{
+		tags: map[string][]string{
+			"demo/bad":  {"broken", "old"},
+			"demo/good": {"new", "old"},
+		},
+		inspect: map[string]registry.InspectResult{
+			"demo/bad:old":  {Digest: "sha256:bad-old", Created: now.Add(-48 * time.Hour)},
+			"demo/good:new": {Digest: "sha256:good-new", Created: now.Add(-time.Hour)},
+			"demo/good:old": {Digest: "sha256:good-old", Created: now.Add(-48 * time.Hour)},
+		},
+		inspectErr: map[string]error{"demo/bad:broken": errors.New("inspect failed")},
+	}
+	restoreClient := newRegistryClient
+	newRegistryClient = func(string, bool) registry.Client { return client }
+	t.Cleanup(func() { newRegistryClient = restoreClient })
+
+	policyPath := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(policyPath, []byte(`version: 1
+rules:
+  - match: "demo/*"
+    keep_last: 1
+`), 0o600); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	setPruneFlags(t, policyPath, "true", "100", "table")
+	if err := pruneCmd.Flags().Set("repo", "demo/bad,demo/good"); err != nil {
+		t.Fatalf("set repositories: %v", err)
+	}
+	var output bytes.Buffer
+	pruneCmd.SetOut(&output)
+	var logs bytes.Buffer
+	restoreLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(restoreLogger) })
+
+	err := runPrune(pruneCmd)
+	var commandErr exitError
+	if !errors.As(err, &commandErr) || commandErr.code != 1 {
+		t.Fatalf("runPrune() error = %v, want exit code 1", err)
+	}
+	if got, want := len(client.deletes), 1; got != want {
+		t.Fatalf("delete calls = %d, want %d", got, want)
+	}
+	if client.deletes[0] != "demo/good@sha256:good-old" {
+		t.Fatalf("delete calls = %v, want only the healthy repository deletion", client.deletes)
+	}
+	if !strings.Contains(output.String(), "demo/bad") ||
+		!strings.Contains(output.String(), "broken") ||
+		!strings.Contains(output.String(), "skip") ||
+		!strings.Contains(output.String(), "inspect-error") {
+		t.Fatalf("prune output %q does not report the skipped tag", output.String())
+	}
+	if !strings.Contains(logs.String(), "demo/bad") || !strings.Contains(logs.String(), "broken") {
+		t.Fatalf("warning log %q does not name repository and tag", logs.String())
+	}
+}
+
+func TestListReportsInspectionFailureAndReturnsExitCodeOne(t *testing.T) {
+	client := &testRegistryClient{
+		tags: map[string][]string{"demo/app": {"broken", "healthy"}},
+		inspect: map[string]registry.InspectResult{
+			"demo/app:healthy": {Digest: "sha256:healthy"},
+		},
+		inspectErr: map[string]error{"demo/app:broken": errors.New("inspect failed")},
+	}
+	restoreClient := newRegistryClient
+	newRegistryClient = func(string, bool) registry.Client { return client }
+	t.Cleanup(func() { newRegistryClient = restoreClient })
+	if err := listCmd.Flags().Set("registry", "localhost:5000"); err != nil {
+		t.Fatalf("set registry: %v", err)
+	}
+	if err := listCmd.Flags().Set("repo", "demo/app"); err != nil {
+		t.Fatalf("set repository: %v", err)
+	}
+	if err := listCmd.Flags().Set("output", "table"); err != nil {
+		t.Fatalf("set output: %v", err)
+	}
+	var output bytes.Buffer
+	listCmd.SetOut(&output)
+	var logs bytes.Buffer
+	restoreLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(restoreLogger) })
+
+	err := runList(listCmd)
+	var commandErr exitError
+	if !errors.As(err, &commandErr) || commandErr.code != 1 {
+		t.Fatalf("runList() error = %v, want exit code 1", err)
+	}
+	if !strings.Contains(output.String(), "healthy") {
+		t.Fatalf("list output %q omitted the successfully inspected tag", output.String())
+	}
+	if !strings.Contains(logs.String(), "demo/app") || !strings.Contains(logs.String(), "broken") {
+		t.Fatalf("warning log %q does not name repository and tag", logs.String())
 	}
 }
 

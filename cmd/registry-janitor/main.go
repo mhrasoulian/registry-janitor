@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -137,6 +138,7 @@ func runList(cmd *cobra.Command) error {
 		Created    string `json:"created"`
 	}
 	entries := make([]entry, 0)
+	inspectionFailures := 0
 	for _, repo := range repos {
 		tags, err := client.Tags(cmd.Context(), repo)
 		if err != nil {
@@ -146,6 +148,8 @@ func runList(cmd *cobra.Command) error {
 		for _, tag := range tags {
 			info, err := client.Inspect(cmd.Context(), repo, tag)
 			if err != nil {
+				slog.WarnContext(cmd.Context(), "tag inspection failed", "repository", repo, "tag", tag, "error", err)
+				inspectionFailures++
 				continue
 			}
 			entries = append(entries, entry{
@@ -163,9 +167,11 @@ func runList(cmd *cobra.Command) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println(string(payload))
+		if _, err := fmt.Fprintln(cmd.OutOrStdout(), string(payload)); err != nil {
+			return err
+		}
 	case "table":
-		writer := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 		fmt.Fprintln(writer, "REPOSITORY\tTAG\tDIGEST\tCREATED")
 		for _, item := range entries {
 			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", item.Repository, item.Tag, item.Digest, item.Created)
@@ -173,6 +179,9 @@ func runList(cmd *cobra.Command) error {
 		if err := writer.Flush(); err != nil {
 			return err
 		}
+	}
+	if inspectionFailures > 0 {
+		return exitError{code: 1, err: fmt.Errorf("%d tag inspection(s) failed", inspectionFailures)}
 	}
 	return nil
 }
@@ -245,6 +254,9 @@ func runPrune(cmd *cobra.Command) error {
 			return err
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "DRY RUN: nothing was deleted. Re-run with --execute to apply.")
+		if skipped := countAction(entries, "skip"); skipped > 0 {
+			return exitError{code: 1, err: fmt.Errorf("%d repository inspection(s) failed", skipped)}
+		}
 		return nil
 	}
 	deleted, failed, kept, entries, err := prune.Execute(cmd.Context(), client, repoNames, cfg, time.Now().UTC(), maxDelete, false)
@@ -255,10 +267,27 @@ func runPrune(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "deleted=%d failed=%d kept=%d\n", deleted, failed, kept)
+	var failures []string
 	if failed > 0 {
-		return exitError{code: 1, err: fmt.Errorf("%d manifest deletion(s) failed", failed)}
+		failures = append(failures, fmt.Sprintf("%d manifest deletion(s) failed", failed))
+	}
+	if skipped := countAction(entries, "skip"); skipped > 0 {
+		failures = append(failures, fmt.Sprintf("%d repository inspection(s) failed", skipped))
+	}
+	if len(failures) > 0 {
+		return exitError{code: 1, err: errors.New(strings.Join(failures, "; "))}
 	}
 	return nil
+}
+
+func countAction(entries []output.Entry, action string) int {
+	count := 0
+	for _, entry := range entries {
+		if entry.Action == action {
+			count++
+		}
+	}
+	return count
 }
 
 func validateOutputFormat(outputType string) error {

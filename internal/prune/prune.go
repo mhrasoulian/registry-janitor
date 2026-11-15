@@ -3,6 +3,7 @@ package prune
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -14,14 +15,13 @@ import (
 
 // Plan is a collection of tag actions for a registry snapshot.
 type Plan struct {
-	Entries      []output.Entry
-	Repositories map[string]bool
+	Entries []output.Entry
 }
 
 func BuildPlan(ctx context.Context, client registry.Client, repos []string, p policy.Policy, now time.Time) ([]Plan, error) {
 	plans := make([]Plan, 0, len(repos))
 	for _, repo := range repos {
-		entryPlan := Plan{Repositories: map[string]bool{repo: true}}
+		entryPlan := Plan{}
 		tagList, err := client.Tags(ctx, repo)
 		if err != nil {
 			return nil, fmt.Errorf("listing tags for %s: %w", repo, err)
@@ -31,16 +31,26 @@ func BuildPlan(ctx context.Context, client registry.Client, repos []string, p po
 		}
 
 		items := make([]policy.Tag, 0, len(tagList))
+		inspectFailed := false
 		for _, tag := range tagList {
 			info, err := client.Inspect(ctx, repo, tag)
 			if err != nil {
-				entryPlan.Repositories = map[string]bool{repo: false}
-				plans = append(plans, entryPlan)
+				slog.WarnContext(ctx, "tag inspection failed; skipping repository", "repository", repo, "tag", tag, "error", err)
+				entryPlan.Entries = append(entryPlan.Entries, output.Entry{
+					Repository: repo,
+					Tag:        tag,
+					Created:    "unknown",
+					Age:        "unknown",
+					Action:     "skip",
+					Reason:     "inspect-error",
+				})
+				inspectFailed = true
 				break
 			}
 			items = append(items, policy.Tag{Name: tag, Digest: info.Digest, Created: info.Created})
 		}
-		if len(entryPlan.Repositories) == 1 && entryPlan.Repositories[repo] == false {
+		if inspectFailed {
+			plans = append(plans, entryPlan)
 			continue
 		}
 
@@ -55,7 +65,7 @@ func BuildPlan(ctx context.Context, client registry.Client, repos []string, p po
 			entryPlan.Entries = append(entryPlan.Entries, output.Entry{
 				Repository: repo,
 				Tag:        decision.Tag,
-				Digest:     truncateDigest(decision.Digest),
+				Digest:     decision.Digest,
 				Created:    formatTimestamp(decision.Created),
 				Age:        formatAge(decision.Age),
 				Action:     decision.Action,
@@ -65,13 +75,6 @@ func BuildPlan(ctx context.Context, client registry.Client, repos []string, p po
 		plans = append(plans, entryPlan)
 	}
 	return plans, nil
-}
-
-func truncateDigest(digest string) string {
-	if len(digest) <= 12 {
-		return digest
-	}
-	return digest[:12]
 }
 
 func formatAge(duration time.Duration) string {
